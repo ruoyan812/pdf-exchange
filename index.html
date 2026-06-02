@@ -1,0 +1,1422 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Office 文档转 PDF 工具 - 浏览器内</title>
+
+<!-- Tailwind CSS -->
+<script src="https://cdn.tailwindcss.com"></script>
+
+<!-- 核心库 -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<!-- pptxviewjs 用于 PPT 渲染: Chart.js (必需, 即使 PPT 无图表), JSZip (必需, 已加载), PptxViewJS -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pptxviewjs/dist/PptxViewJS.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/node-forge@1.3.1/dist/forge.min.js"></script>
+<script>
+  // 立即检查 forge 是否加载, 失败则禁用 PFX 功能
+  if (typeof forge === 'undefined') {
+    console.error('[Office2PDF] node-forge 加载失败');
+    window.addEventListener('DOMContentLoaded', () => {
+      const warn = document.createElement('div');
+      warn.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#dc2626;color:white;padding:12px;text-align:center;z-index:9999;font-family:sans-serif;font-size:14px;';
+      warn.innerHTML = '⚠ node-forge 库加载失败, PFX 签名功能不可用. 请检查网络或刷新页面 (F5).';
+      document.body.prepend(warn);
+    });
+  } else {
+    console.log('[Office2PDF] node-forge 已加载');
+  }
+  // 检查 html2canvas 是否加载
+  if (typeof html2canvas === 'undefined') {
+    console.error('[Office2PDF] html2canvas 加载失败');
+    window.addEventListener('DOMContentLoaded', () => {
+      const warn = document.createElement('div');
+      warn.style.cssText = 'position:fixed;top:40px;left:0;right:0;background:#dc2626;color:white;padding:12px;text-align:center;z-index:9999;font-family:sans-serif;font-size:14px;';
+      warn.innerHTML = '⚠ html2canvas 库加载失败, 无法生成 PDF. 请检查网络或刷新页面 (F5).';
+      document.body.prepend(warn);
+    });
+  } else {
+    console.log('[Office2PDF] html2canvas 已加载');
+  }
+  // 检查 PptxViewJS 是否加载 (PPTX 渲染用)
+  if (typeof window.PptxViewJS === 'undefined') {
+    console.warn('[Office2PDF] PptxViewJS 加载失败, PPT 将使用后备解析器');
+  } else {
+    console.log('[Office2PDF] PptxViewJS 已加载 (PPT 高保真渲染就绪)');
+  }
+</script>
+
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .drop-zone { transition: all 0.2s; }
+  .drop-zone.dragover { background-color: #dbeafe; border-color: #3b82f6; }
+  .progress-bar { transition: width 0.3s; }
+  .sig-canvas { display: block; }
+</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+  <!-- 通用居中弹窗: 访问/下载/预览 共用 -->
+  <div id="appModal" class="hidden fixed inset-0 z-[100] flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm" style="animation: fadeIn 0.2s ease-out;">
+    <div class="bg-white rounded-xl shadow-2xl max-w-md w-full mx-4 overflow-hidden" style="animation: scaleIn 0.2s ease-out;">
+      <div class="p-6">
+        <div class="flex items-start gap-3 mb-2">
+          <span id="appModalIcon" class="text-3xl flex-shrink-0">📢</span>
+          <h3 id="appModalTitle" class="text-lg font-semibold text-gray-900 pt-0.5">温馨提示</h3>
+        </div>
+        <p id="appModalMessage" class="text-sm text-gray-700 leading-relaxed pl-11">消息内容</p>
+      </div>
+      <div class="bg-gray-50 px-6 py-3 flex justify-end gap-2">
+        <button id="appModalCancel" type="button" class="hidden px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-100 transition text-sm font-medium">取消</button>
+        <button id="appModalOk" type="button" class="px-5 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition text-sm font-medium">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes scaleIn { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+  </style>
+
+  <script>
+    // 通用弹窗函数 (返回 Promise; 无勾选框时 resolve 为 boolean, 有勾选框时 resolve 为 {ok, checked})
+    function showModal({ title, message, icon = '📢', okText = '我知道了', cancelText = '取消', showCancel = false, showCheckbox = false, checkboxLabel = '' }) {
+      return new Promise((resolve) => {
+        const modal = document.getElementById('appModal');
+        document.getElementById('appModalIcon').textContent = icon;
+        document.getElementById('appModalTitle').textContent = title;
+        document.getElementById('appModalMessage').textContent = message;
+        document.getElementById('appModalOk').textContent = okText;
+        document.getElementById('appModalCancel').textContent = cancelText;
+        const cancelBtn = document.getElementById('appModalCancel');
+        cancelBtn.classList.toggle('hidden', !showCancel);
+
+        // 动态插入/更新勾选框
+        const existing = document.getElementById('appModalCheckbox');
+        if (showCheckbox) {
+          let wrap = existing;
+          if (!wrap) {
+            wrap = document.createElement('label');
+            wrap.id = 'appModalCheckbox';
+            wrap.className = 'flex items-center gap-2 text-sm text-gray-600 select-none cursor-pointer mr-auto';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.id = 'appModalCheckboxInput';
+            cb.className = 'w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500';
+            const span = document.createElement('span');
+            span.id = 'appModalCheckboxLabel';
+            wrap.appendChild(cb);
+            wrap.appendChild(span);
+            const btnRow = document.getElementById('appModalOk').parentElement;
+            btnRow.insertBefore(wrap, btnRow.firstChild);
+          }
+          wrap.classList.remove('hidden');
+          document.getElementById('appModalCheckboxInput').checked = false;
+          document.getElementById('appModalCheckboxLabel').textContent = checkboxLabel;
+        } else if (existing) {
+          existing.classList.add('hidden');
+        }
+
+        const getChecked = () => {
+          const cb = document.getElementById('appModalCheckboxInput');
+          return cb && showCheckbox ? cb.checked : false;
+        };
+
+        const onOk = () => {
+          const checked = getChecked();
+          cleanup();
+          resolve(showCheckbox ? { ok: true, checked } : true);
+        };
+        const onCancel = () => {
+          const checked = getChecked();
+          cleanup();
+          resolve(showCheckbox ? { ok: false, checked } : false);
+        };
+
+        function cleanup() {
+          modal.classList.add('hidden');
+          document.getElementById('appModalOk').removeEventListener('click', onOk);
+          cancelBtn.removeEventListener('click', onCancel);
+        }
+
+        document.getElementById('appModalOk').addEventListener('click', onOk);
+        if (showCancel) cancelBtn.addEventListener('click', onCancel);
+        modal.classList.remove('hidden');
+      });
+    }
+
+    // 每次访问都显示温馨提示弹窗 (用户在底部勾选"不再提醒"可永久关闭)
+    (function() {
+      if (localStorage.getItem('office2pdf_never_show') === '1') return;
+      setTimeout(() => {
+        showModal({
+          title: '温馨提示',
+          message: '本网站转换的 PDF 不会储存在云端服务器上（其实根本没有服务器）—— 所有处理均在您的浏览器本地完成, 文件不会上传。\n\n由于是纯浏览器渲染, 转换结果可能存在错误或排版偏差, 敬请谅解~😊',
+          icon: '📢',
+          okText: '我知道了',
+          showCheckbox: true,
+          checkboxLabel: '不再提醒 (永久关闭)',
+        }).then(({ checked }) => {
+          if (checked) localStorage.setItem('office2pdf_never_show', '1');
+        });
+      }, 300);
+    })();
+  </script>
+<div class="container mx-auto px-4 py-8 max-w-5xl">
+
+  <header class="text-center mb-8">
+    <h1 class="text-3xl font-bold text-gray-900 mb-2">Office 文档转 PDF 工具</h1>
+    <p class="text-gray-600">支持 Word / Excel / PowerPoint / WPS / TXT / XML / DOC / RTF / MD / HTML / CSV，浏览器内处理</p>
+  </header>
+
+  <!-- 步骤 1: 文件选择 -->
+  <div class="bg-white rounded-lg shadow-sm p-6 mb-6">
+    <h2 class="text-lg font-semibold mb-4">① 选择源文件</h2>
+    <div id="dropZone" class="drop-zone border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:border-blue-500">
+      <input type="file" id="fileInput" accept=".docx,.xlsx,.pptx,.doc,.rtf,.txt,.xml,.wps,.md,.html,.htm,.csv" class="hidden">
+      <svg class="mx-auto h-12 w-12 text-gray-400 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+      </svg>
+      <p class="text-gray-600 mb-1">点击或拖拽文件到此处</p>
+      <p class="text-xs text-gray-500">支持: .docx / .xlsx / .pptx / .doc / .rtf / .txt / .xml / .wps / .md / .html / .csv</p>
+    </div>
+    <div id="fileInfo" class="mt-4 hidden">
+      <div class="flex items-center justify-between bg-blue-50 p-3 rounded">
+        <div>
+          <span id="fileName" class="font-medium text-gray-900"></span>
+          <span id="fileSize" class="text-sm text-gray-600 ml-2"></span>
+          <span id="fileType" class="text-xs bg-blue-200 text-blue-800 px-2 py-0.5 rounded ml-2"></span>
+        </div>
+        <button id="convertBtn" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition">开始转换</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 步骤 2: 转换进度 -->
+  <div id="progressSection" class="bg-white rounded-lg shadow-sm p-6 mb-6 hidden">
+    <h2 class="text-lg font-semibold mb-4">② 转换中</h2>
+    <div class="w-full bg-gray-200 rounded-full h-2 mb-3">
+      <div id="progressBar" class="progress-bar bg-blue-600 h-2 rounded-full" style="width: 0%"></div>
+    </div>
+    <p id="progressText" class="text-sm text-gray-600">准备中...</p>
+  </div>
+
+  <!-- 步骤 3: 签名配置 -->
+  <div id="signatureSection" class="bg-white rounded-lg shadow-sm p-6 mb-6 hidden">
+    <h2 class="text-lg font-semibold mb-4">③ 添加签名</h2>
+
+    <!-- 签名类型选择 -->
+    <div class="mb-5">
+      <label class="block text-sm font-medium text-gray-700 mb-2">签名类型</label>
+      <div class="flex gap-4 text-sm">
+        <label class="flex items-center cursor-pointer">
+          <input type="radio" name="sigType" value="image" checked class="mr-2"> 图片签名
+        </label>
+        <label class="flex items-center cursor-pointer">
+          <input type="radio" name="sigType" value="none" class="mr-2"> 仅证书签名 (不绘制图片)
+        </label>
+      </div>
+    </div>
+
+    <!-- 图片签名 -->
+    <div id="imageSigSection" class="mb-5">
+      <label class="block text-sm font-medium text-gray-700 mb-1">签名图片 (PNG / JPG)</label>
+      <div class="flex items-center gap-3">
+        <label class="cursor-pointer bg-gray-100 hover:bg-gray-200 px-4 py-2 rounded border border-gray-300 text-sm">
+          选择图片
+          <input type="file" id="signatureInput" accept="image/png,image/jpeg" class="hidden">
+        </label>
+        <img id="signaturePreview" class="hidden h-12 max-w-[200px] border rounded bg-white" alt="预览">
+        <span id="signatureName" class="text-sm text-gray-600"></span>
+      </div>
+      <p class="text-xs text-gray-500 mt-1">建议使用透明背景的 PNG 图片</p>
+    </div>
+
+    <!-- 证书签名 (可选) -->
+    <div class="mb-5 border-t pt-4">
+      <div class="flex items-center gap-2 mb-3">
+        <input type="checkbox" id="useCert" checked class="rounded">
+        <label for="useCert" class="text-sm font-medium text-gray-700 cursor-pointer">
+          附加证书签名 (PFX / RSA-2048 / SHA-256) — 取消勾选即 <b>不使用证书</b>
+        </label>
+      </div>
+      <div id="certOptions">
+        <p class="text-sm text-gray-700 mb-2">输入证书主题 (CN), 每次签名时会自动生成对应的 RSA-2048 自签名证书:</p>
+        <input type="text" id="pfxSubject" class="w-full max-w-md border border-gray-300 rounded px-3 py-2 focus:outline-none focus:border-blue-500" placeholder="如: cert.roooooyan.work" value="cert.roooooyan.work">
+        <p class="text-xs text-gray-500 mt-1">签名后将在 PDF <b>末尾追加独立签名页</b> 显示证书详情, 元数据也会记录 (用 PDF 阅读器"文档属性→描述"查看)。</p>
+      </div>
+    </div>
+
+    <!-- 位置 / 大小 / 页码 -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">签名位置</label>
+        <select id="signPosition" class="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:border-blue-500">
+          <option value="br" selected>右下角</option>
+          <option value="bl">左下角</option>
+          <option value="tr">右上角</option>
+          <option value="tl">左上角</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">签名大小</label>
+        <select id="signSize" class="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:border-blue-500">
+          <option value="40">小 (40mm)</option>
+          <option value="60" selected>中 (60mm)</option>
+          <option value="80">大 (80mm)</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">应用页面</label>
+        <select id="signPages" class="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:border-blue-500">
+          <option value="last" selected>仅最后一页</option>
+          <option value="first">仅第一页</option>
+          <option value="all">每页</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">附加说明 (可选)</label>
+        <input type="text" id="signCaption" class="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:border-blue-500" placeholder="如：已审核">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">日期 (可选)</label>
+        <input type="text" id="signDate" class="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:border-blue-500" placeholder="留空使用当前时间">
+      </div>
+    </div>
+
+    <div class="flex items-center gap-2 mb-4">
+      <!-- 旧的 useCrypto 复选框已弃用, 证书功能由上面的 useCert 控制 -->
+    </div>
+
+    <div class="flex gap-3 mb-4">
+      <button id="signBtn" class="bg-green-600 text-white px-6 py-2 rounded hover:bg-green-700 transition">添加签名并下载</button>
+      <button id="previewBtn" class="bg-gray-200 text-gray-700 px-6 py-2 rounded hover:bg-gray-300 transition">预览未签名 PDF</button>
+      <button id="verifyBtn" class="bg-purple-600 text-white px-6 py-2 rounded hover:bg-purple-700 transition hidden">验证加密签名</button>
+    </div>
+
+    <div class="verify-result hidden p-3 bg-gray-50 border rounded text-sm mb-3"></div>
+
+    <div class="p-3 bg-yellow-50 border border-yellow-200 rounded text-xs text-yellow-800 leading-relaxed">
+      <strong>说明：</strong>本工具会将签名图章（文字/图片/内置任选其一）嵌入到 PDF 选定位置。
+      <br><br>
+      <strong>关于"数字签名"：</strong>符合 PDF 行业标准 (eIDAS / 21 CFR Part 11) 的数字签名需要 X.509 证书和 PKCS#7/CAdES 格式，
+      纯浏览器内实现复杂。本工具通过 <code>Web Crypto API</code> 提供的 "RSA + SHA-256 字节签名" 能保证
+      <strong>内容完整性</strong> (检测 PDF 是否被篡改)，但不具备法律效力。
+    </div>
+  </div>
+
+  <!-- PDF 预览 -->
+  <div id="previewSection" class="bg-white rounded-lg shadow-sm p-6 mb-6 hidden">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-semibold">PDF 预览</h2>
+      <a id="previewDownloadLink" class="text-sm text-blue-600 hover:underline" download="preview.pdf">下载查看</a>
+    </div>
+    <embed id="pdfPreview" type="application/pdf" class="w-full h-[600px] border rounded bg-gray-100" />
+    <p class="text-xs text-gray-500 mt-2">如未显示内容，请使用"下载查看"链接 (部分浏览器禁用内置 PDF 阅读器)。</p>
+  </div>
+</div>
+
+<script>
+/**
+ * Office / 通用文档 → PDF 浏览器内转换 + 三种签名类型
+ * 关键修复: html2pdf 直接传 HTML 字符串, 避开 left:-99999px 离屏渲染空白问题
+ */
+
+const state = {
+  file: null, fileType: null, pdfBytes: null,
+  lastSignature: null, signatureImageBytes: null, previewUrl: null,
+};
+
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const fileInfo = document.getElementById('fileInfo');
+const fileNameEl = document.getElementById('fileName');
+const fileSizeEl = document.getElementById('fileSize');
+const fileTypeEl = document.getElementById('fileType');
+const convertBtn = document.getElementById('convertBtn');
+const progressSection = document.getElementById('progressSection');
+const progressBar = document.getElementById('progressBar');
+const progressText = document.getElementById('progressText');
+const signatureSection = document.getElementById('signatureSection');
+const signBtn = document.getElementById('signBtn');
+const previewBtn = document.getElementById('previewBtn');
+const verifyBtn = document.getElementById('verifyBtn');
+const previewSection = document.getElementById('previewSection');
+const pdfPreview = document.getElementById('pdfPreview');
+const previewDownloadLink = document.getElementById('previewDownloadLink');
+const signatureInput = document.getElementById('signatureInput');
+const signaturePreview = document.getElementById('signaturePreview');
+const signatureName = document.getElementById('signatureName');
+const textSignatureInput = null;  // 文字签名已删除
+const textSigPreviewCanvas = null;  // 文字签名已删除
+const builtinSigPreviewCanvas = null;  // 已废弃
+const pfxSubjectInput = document.getElementById('pfxSubject');
+
+const SUPPORTED_TYPES = ['docx','xlsx','pptx','doc','rtf','txt','xml','wps','md','html','htm','csv'];
+const BUILTIN_SIG = { website: 'cert.roooooyan.work', admin: 'Yan-website admin', label: 'CERTIFIED' };
+const PFX_CNS = ['cert.roooooyan.work', 'Yanverse-admin'];
+
+// ===== 文件上传 =====
+dropZone.addEventListener('click', () => fileInput.click());
+['dragover','dragenter'].forEach(ev => dropZone.addEventListener(ev, e => { e.preventDefault(); dropZone.classList.add('dragover'); }));
+['dragleave','drop'].forEach(ev => dropZone.addEventListener(ev, e => { e.preventDefault(); dropZone.classList.remove('dragover'); }));
+dropZone.addEventListener('drop', e => { if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', e => { if (e.target.files.length) handleFile(e.target.files[0]); });
+
+function handleFile(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (!SUPPORTED_TYPES.includes(ext)) {
+    alert('不支持: .' + ext + '\n支持的: ' + SUPPORTED_TYPES.map(t => '.' + t).join(', '));
+    return;
+  }
+  if (file.size > 50 * 1024 * 1024) alert('文件较大（>50MB），建议使用更小的文件');
+  state.file = file; state.fileType = ext; state.pdfBytes = null; state.lastSignature = null;
+  if (state.previewUrl) { URL.revokeObjectURL(state.previewUrl); state.previewUrl = null; }
+  fileNameEl.textContent = file.name;
+  fileSizeEl.textContent = `(${(file.size / 1024).toFixed(2)} KB)`;
+  fileTypeEl.textContent = ext.toUpperCase();
+  fileInfo.classList.remove('hidden');
+  signatureSection.classList.add('hidden');
+  previewSection.classList.add('hidden');
+  verifyBtn.classList.add('hidden');
+  document.querySelector('.verify-result')?.classList.add('hidden');
+}
+convertBtn.addEventListener('click', convertFile);
+
+signatureInput.addEventListener('change', e => {
+  const f = e.target.files[0]; if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    state.signatureImageBytes = new Uint8Array(reader.result);
+    signaturePreview.src = reader.result;
+    signaturePreview.classList.remove('hidden');
+    signatureName.textContent = `已选择: ${f.name}`;
+  };
+  reader.readAsArrayBuffer(f);
+});
+
+document.querySelectorAll('input[name="sigType"]').forEach(radio => {
+  radio.addEventListener('change', e => {
+    const type = e.target.value;
+    document.getElementById('imageSigSection').classList.toggle('hidden', type !== 'image');
+  });
+});
+
+// 证书签名复选框: 取消勾选即"不使用证书"
+document.getElementById('useCert')?.addEventListener('change', e => {
+  document.getElementById('certOptions').classList.toggle('hidden', !e.target.checked);
+});
+
+// 文字签名已删除, 跳过
+// 证书签名模式无需 canvas 预览 (运行时生成)
+
+// 已废弃: 内置图章函数
+function updateBuiltinSigPreview() {
+  // no-op
+}
+function drawCanvasToDisplay(src, dst, w, h) {
+  if (!dst) return;
+  dst.width = w; dst.height = h;
+  const ctx = dst.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(src, 0, 0, w, h);
+}
+
+// 文字签名已删除, 保留函数以避免破坏其他引用
+function updateTextSigPreview() {
+  // no-op
+}
+
+// ===== Canvas 签名图章生成 (文字签名已删除) =====
+function generateTextSigCanvas(text) {
+  const dpr = 2;
+  const W = 600, H = 200;
+  const canvas = document.createElement('canvas');
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#1a3a5c';
+  ctx.font = 'italic bold 64px "Brush Script MT", "Lucida Handwriting", "STKaiti", "KaiTi", "Kaiti SC", cursive';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text || 'Your Name', W / 2, H / 2 - 10);
+  ctx.strokeStyle = '#1a3a5c';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(W / 2 - 150, H / 2 + 50);
+  ctx.bezierCurveTo(W / 2 - 80, H / 2 + 60, W / 2 + 80, H / 2 + 40, W / 2 + 150, H / 2 + 50);
+  ctx.stroke();
+  return canvas;
+}
+
+function generateBuiltinSigCanvas() {
+  const dpr = 2;
+  const W = 500, H = 280;
+  const canvas = document.createElement('canvas');
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+  // 外层红边
+  ctx.strokeStyle = '#8b1a1a';
+  ctx.lineWidth = 5;
+  ctx.strokeRect(8, 8, W - 16, H - 16);
+  // 内层红边
+  ctx.lineWidth = 1;
+  ctx.strokeRect(20, 20, W - 40, H - 40);
+  // CERTIFIED 标头
+  ctx.fillStyle = '#8b1a1a';
+  ctx.font = 'bold 24px Arial, "Microsoft YaHei", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText(BUILTIN_SIG.label, W / 2, 35);
+  // 分隔线
+  ctx.beginPath();
+  ctx.moveTo(W / 2 - 80, 75);
+  ctx.lineTo(W / 2 + 80, 75);
+  ctx.stroke();
+  // 网址
+  ctx.fillStyle = '#1a1a1a';
+  ctx.font = 'bold 26px Georgia, "Times New Roman", "Microsoft YaHei", serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(BUILTIN_SIG.website, W / 2, 120);
+  // 管理员
+  ctx.fillStyle = '#333';
+  ctx.font = '18px Arial, "Microsoft YaHei", sans-serif';
+  ctx.fillText(BUILTIN_SIG.admin, W / 2, 165);
+  // 日期
+  const dateStr = new Date().toISOString().split('T')[0];
+  ctx.fillStyle = '#666';
+  ctx.font = '14px "Courier New", monospace';
+  ctx.fillText(dateStr, W / 2, 220);
+  return canvas;
+}
+
+function canvasToPngBytes(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(async (blob) => {
+      try {
+        const buffer = await blob.arrayBuffer();
+        resolve(new Uint8Array(buffer));
+      } catch (e) { reject(e); }
+    }, 'image/png');
+  });
+}
+
+// ===== 转换主流程 (关键修复) =====
+async function convertFile() {
+  try {
+    progressSection.classList.remove('hidden');
+    progressBar.style.width = '10%';
+    progressText.textContent = '读取文件中...';
+    const arrayBuffer = await state.file.arrayBuffer();
+    progressBar.style.width = '25%';
+
+    // 检测页面方向 (docx/pptx/xlsx)
+    const orientation = await detectOrientation(arrayBuffer, state.fileType);
+    const isLandscape = orientation === 'landscape';
+    if (isLandscape) console.log('[Office2PDF] 检测到横向文件, 将生成横向 PDF');
+
+    // === PPT 走"直接 PDF"通道, 彻底避免 HTML 切片错位 ===
+    let pdfBytes, numPages;
+    if (state.fileType === 'pptx') {
+      progressBar.style.width = '50%';
+      progressText.textContent = 'PPT 逐页直接渲染...';
+      const result = await convertPptxToPdfDirect(arrayBuffer, isLandscape, (cur, total) => {
+        progressBar.style.width = (50 + Math.round(40 * cur / total)) + '%';
+      });
+      pdfBytes = result.pdfBytes;
+      numPages = result.numPages;
+    } else {
+      // 其他文件类型: 走 HTML → 高画布 → 切片 流程
+      let htmlContent = await convertToHtml(arrayBuffer, state.fileType, isLandscape);
+      if (!htmlContent || htmlContent.length < 50) throw new Error('转换结果为空，源文件可能损坏');
+      if (typeof html2canvas === 'undefined') throw new Error('html2canvas 库未加载, 请检查网络后刷新页面');
+
+      progressBar.style.width = '50%';
+      progressText.textContent = '渲染内容为图片 (逐页光栅化)...';
+
+      const A4 = isLandscape ? { w: 297, h: 210 } : { w: 210, h: 297 };
+      const PX_PER_MM = 3.78;
+      const RENDER_W = Math.round(A4.w * PX_PER_MM);
+      const PAGE_H = Math.round(A4.h * PX_PER_MM);
+      const MAX_PAGES = 80;
+      const MAX_HEIGHT = PAGE_H * MAX_PAGES;
+
+      const fullCanvas = await renderHtmlToFullCanvas(htmlContent, RENDER_W, MAX_HEIGHT);
+      console.log(`[Office2PDF] 渲染画布: ${fullCanvas.width}x${fullCanvas.height}px`);
+      if (fullCanvas.height > MAX_HEIGHT) {
+        throw new Error(`内容过长 (${fullCanvas.height}px), 超过 ${MAX_PAGES} 页上限, 请拆分文件后重试`);
+      }
+
+      progressBar.style.width = '75%';
+      progressText.textContent = '组装 PDF 页面...';
+
+      numPages = Math.ceil(fullCanvas.height / PAGE_H);
+      pdfBytes = await buildPdfFromCanvas(fullCanvas, RENDER_W, PAGE_H, A4, numPages, (pct) => {
+        progressBar.style.width = (75 + Math.round(20 * pct)) + '%';
+      });
+    }
+
+    state.pdfBytes = pdfBytes;
+    state.orientation = orientation;
+    state.numPages = numPages;
+    progressBar.style.width = '100%';
+    progressText.textContent = `✓ 转换完成 (${(pdfBytes.length / 1024).toFixed(1)} KB, ${numPages} 页, ${isLandscape ? '横向' : '纵向'})`;
+    signatureSection.classList.remove('hidden');
+    signatureSection.scrollIntoView({ behavior: 'smooth' });
+  } catch (err) {
+    console.error(err);
+    progressText.textContent = '✗ 转换失败：' + err.message;
+  }
+}
+
+// 将 HTML 字符串渲染为一张白色背景的高画布
+async function renderHtmlToFullCanvas(html, widthPx, maxHeight) {
+  const container = document.createElement('div');
+  container.id = '__renderHost_' + Date.now();
+  container.style.cssText = [
+    'position: fixed',
+    'left: -99999px',
+    'top: 0',
+    'background: #ffffff',
+    'box-sizing: border-box',
+    `width: ${widthPx}px`,
+    'padding: 0',
+    'margin: 0',
+    'z-index: -1',
+  ].join(';');
+  container.innerHTML = html;
+  document.body.appendChild(container);
+
+  try {
+    // 等待所有图片加载完成
+    const imgs = Array.from(container.querySelectorAll('img'));
+    await Promise.all(imgs.map(img => {
+      if (img.complete && img.naturalWidth > 0) return null;
+      return new Promise(r => {
+        img.addEventListener('load', r, { once: true });
+        img.addEventListener('error', r, { once: true });
+        setTimeout(r, 3000); // 单图最多等 3s
+      });
+    }));
+    // 给字体/布局一帧稳定时间
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+    const naturalHeight = container.scrollHeight;
+    const renderHeight = Math.min(naturalHeight, maxHeight);
+    console.log(`[Office2PDF] 容器高度: ${naturalHeight}px, 渲染高度: ${renderHeight}px`);
+
+    const canvas = await html2canvas(container, {
+      scale: 1,
+      backgroundColor: '#ffffff',
+      useCORS: true,
+      logging: false,
+      width: widthPx,
+      height: renderHeight,
+      windowWidth: widthPx,
+      scrollX: 0,
+      scrollY: 0,
+    });
+    return canvas;
+  } finally {
+    if (container.parentNode) document.body.removeChild(container);
+  }
+}
+
+// 把一张高画布按 A4 尺寸切片, 每片用 pdf-lib 创建一页
+async function buildPdfFromCanvas(canvas, pageWidthPx, pageHeightPx, a4Mm, numPages, onProgress) {
+  const pdfDoc = await PDFLib.PDFDocument.create();
+  // 1mm = 2.83465 pt (PDF 单位)
+  const pageWidthPt = a4Mm.w * 2.83465;
+  const pageHeightPt = a4Mm.h * 2.83465;
+
+  for (let i = 0; i < numPages; i++) {
+    const yOffset = i * pageHeightPx;
+    const sliceHeight = Math.min(pageHeightPx, canvas.height - yOffset);
+
+    // 创建 A4 大小白底画布
+    const pageCanvas = document.createElement('canvas');
+    pageCanvas.width = pageWidthPx;
+    pageCanvas.height = pageHeightPx;
+    const ctx = pageCanvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, pageWidthPx, pageHeightPx);
+    // 将高画布对应切片画到该页画布上
+    ctx.drawImage(canvas, 0, yOffset, pageWidthPx, sliceHeight, 0, 0, pageWidthPx, sliceHeight);
+
+    // 转 PNG 字节
+    const blob = await new Promise(r => pageCanvas.toBlob(r, 'image/png'));
+    const pngBytes = new Uint8Array(await blob.arrayBuffer());
+    const png = await pdfDoc.embedPng(pngBytes);
+    const page = pdfDoc.addPage([pageWidthPt, pageHeightPt]);
+    page.drawImage(png, { x: 0, y: 0, width: pageWidthPt, height: pageHeightPt });
+
+    if (onProgress) onProgress((i + 1) / numPages);
+  }
+  return await pdfDoc.save();
+}
+
+// 检测源文件页面方向
+async function detectOrientation(arrayBuffer, type) {
+  try {
+    if (type === 'docx') {
+      const zip = new JSZip();
+      const contents = await zip.loadAsync(arrayBuffer);
+      const xml = await contents.files['word/document.xml']?.async('text');
+      if (xml) {
+        const o = xml.match(/<w:pgSz[^>]*?w:orient="(landscape|portrait)"/);
+        if (o) return o[1];
+        const d = xml.match(/<w:pgSz[^>]*?w:w="(\d+)"[^>]*?w:h="(\d+)"/);
+        if (d) return parseInt(d[1]) > parseInt(d[2]) ? 'landscape' : 'portrait';
+      }
+    } else if (type === 'pptx') {
+      const zip = new JSZip();
+      const contents = await zip.loadAsync(arrayBuffer);
+      const xml = await contents.files['ppt/presentation.xml']?.async('text');
+      if (xml) {
+        const o = xml.match(/<p:sldSz[^>]*?type="(screen4x3|screen16x9|landscape)"/);
+        if (o) return o[1] === 'landscape' || o[1] === 'screen16x9' ? 'landscape' : 'portrait';
+        const d = xml.match(/<p:sldSz[^>]*?cx="(\d+)"[^>]*?cy="(\d+)"/);
+        if (d) return parseInt(d[1]) > parseInt(d[2]) ? 'landscape' : 'portrait';
+      }
+    } else if (type === 'xlsx') {
+      const wb = XLSX.read(arrayBuffer, { type: 'array' });
+      for (const name of wb.SheetNames) {
+        const ps = wb.Sheets[name]['!pageSetup'] || wb.Sheets[name]['!pageSetup'];
+        // SheetJS doesn't always have pageSetup; fallback: check sheet dimensions
+      }
+    }
+  } catch (e) {
+    console.warn('[Office2PDF] 方向检测失败:', e);
+  }
+  return 'portrait';
+}
+
+async function convertToHtml(arrayBuffer, type, isLandscape) {
+  switch (type) {
+    case 'docx': return await convertDocxToHtml(arrayBuffer);
+    case 'xlsx': return await convertXlsxToHtml(arrayBuffer);
+    case 'csv':  return await convertCsvToHtml(arrayBuffer);
+    case 'pptx': return await convertPptxToHtml(arrayBuffer, isLandscape);
+    case 'wps':  return await convertWpsToHtml(arrayBuffer);
+    case 'doc':  return await convertDocToHtml(arrayBuffer);
+    case 'rtf':  return await convertRtfToHtml(arrayBuffer);
+    case 'txt':  return await convertTxtToHtml(arrayBuffer);
+    case 'xml':  return await convertXmlToHtml(arrayBuffer);
+    case 'md':   return await convertMdToHtml(arrayBuffer);
+    case 'html':
+    case 'htm':  return await convertHtmlFileToHtml(arrayBuffer);
+    default: throw new Error('未实现的转换器: ' + type);
+  }
+}
+
+// ===== 各种转换器 =====
+async function convertDocxToHtml(arrayBuffer) {
+  const result = await mammoth.convertToHtml({ arrayBuffer });
+  return `<div style="padding: 20px 30px; font-family: 'Microsoft YaHei', serif; line-height: 1.7; font-size: 14px; color: #222;">${result.value}</div>`;
+}
+
+function workbookToHtml(workbook) {
+  let html = `<div style="padding: 20px;">`;
+  workbook.SheetNames.forEach((sheetName, idx) => {
+    const sheet = workbook.Sheets[sheetName];
+    let sheetHtml = XLSX.utils.sheet_to_html(sheet, { editable: false });
+    // 把样式转为内联, 避免 html2pdf 字符串模式下丢失
+    sheetHtml = sheetHtml
+      .replace(/<table /g, '<table style="border-collapse:collapse;width:100%;font-family:Microsoft YaHei,serif;font-size:12px;" ')
+      .replace(/<td/g, '<td style="border:1px solid #555;padding:6px 10px;text-align:left;vertical-align:top;"')
+      .replace(/<th/g, '<th style="border:1px solid #555;padding:6px 10px;text-align:left;vertical-align:top;background:#e8e8e8;font-weight:bold;"');
+    html += `<div style="page-break-after:${idx < workbook.SheetNames.length - 1 ? 'always' : 'auto'};">
+      <h2 style="text-align:center;margin:20px 0 14px;font-family:'Microsoft YaHei',serif;font-size:18px;">${escapeHtml(sheetName)}</h2>
+      ${sheetHtml}</div>`;
+  });
+  html += '</div>';
+  return html;
+}
+
+async function convertXlsxToHtml(arrayBuffer) {
+  return workbookToHtml(XLSX.read(arrayBuffer, { type: 'array' }));
+}
+async function convertCsvToHtml(arrayBuffer) {
+  const text = new TextDecoder('utf-8').decode(arrayBuffer);
+  return workbookToHtml(XLSX.read(text, { type: 'string' }));
+}
+
+async function convertPptxToHtml(arrayBuffer) {
+  // 优先使用 pptxviewjs 进行高保真渲染 (保留原版背景/字体/形状/图表)
+  if (window.PptxViewJS && window.PptxViewJS.PPTXViewer && typeof Chart !== 'undefined') {
+    try {
+      return await convertPptxWithViewer(arrayBuffer);
+    } catch (err) {
+      console.warn('[Office2PDF] pptxviewjs 渲染失败, 回退到解析器方案:', err);
+    }
+  } else {
+    console.warn('[Office2PDF] pptxviewjs/Chart 不可用, 使用后备解析器');
+  }
+  // 后备方案: 旧解析器
+  return await convertPptxToHtmlFallback(arrayBuffer);
+}
+
+// PPT 走"直接 PDF"通道: 每张幻灯片单独渲染到 canvas, 单独嵌入 PDF 页 (彻底避免 HTML 切片错位)
+async function convertPptxToPdfDirect(arrayBuffer, isLandscape, onProgress) {
+  if (!window.PptxViewJS || !window.PptxViewJS.PPTXViewer) {
+    throw new Error('pptxviewjs 库未加载, 无法直接渲染 PPT. 请检查网络或刷新页面 (F5).');
+  }
+  if (typeof Chart === 'undefined') {
+    throw new Error('chart.js 库未加载, pptxviewjs 需要它. 请检查网络或刷新页面 (F5).');
+  }
+
+  // 离屏高分辨率画布
+  const W = 1920, H = 1080;
+  const renderCanvas = document.createElement('canvas');
+  renderCanvas.width = W;
+  renderCanvas.height = H;
+  renderCanvas.style.cssText = 'position:fixed;left:-99999px;top:0;z-index:-1;pointer-events:none;';
+  document.body.appendChild(renderCanvas);
+
+  const viewer = new PptxViewJS.PPTXViewer({
+    canvas: renderCanvas,
+    backgroundColor: '#ffffff',
+    autoRenderFirstSlide: false,
+    enableThumbnails: false,
+    autoExposeGlobals: false,
+  });
+
+  try {
+    await viewer.loadFile(arrayBuffer);
+    const slideCount = viewer.getSlideCount();
+    console.log(`[Office2PDF] PPT 包含 ${slideCount} 张幻灯片 (直接 PDF 通道)`);
+    if (slideCount === 0) throw new Error('PPTX 中无幻灯片');
+
+    // === 关键: PDF 页面比例 = 幻灯片比例, 避免拉伸变形 (字体/行距失真) ===
+    // 离屏画布是 16:9 (W=1920, H=1080). 实际幻灯片比例由 pptxviewjs 在 canvas 内呈现
+    // 16:9 → 842×474 pt; 4:3 → 842×632 pt; 16:10 → 842×527 pt
+    const slideAspect = W / H; // 1.778 (16:9)
+    const pdfPageW = 842;  // A4 横向宽度 (pt), 选最大宽度以保证清晰度
+    const pdfPageH = Math.round(pdfPageW / slideAspect);
+    console.log(`[Office2PDF] PPT 页面尺寸: ${pdfPageW}×${pdfPageH}pt (比例 ${(pdfPageW/pdfPageH).toFixed(3)})`);
+
+    const pdfDoc = await PDFLib.PDFDocument.create();
+
+    for (let i = 0; i < slideCount; i++) {
+      if (onProgress) onProgress(i + 1, slideCount);
+      progressText.textContent = `直接渲染 PPT 第 ${i + 1}/${slideCount} 页...`;
+      await viewer.render(renderCanvas, { slideIndex: i });
+      // 等待图表/异步内容完成
+      await new Promise(r => setTimeout(r, 350));
+
+      // 转 PNG 字节
+      const blob = await new Promise(r => renderCanvas.toBlob(r, 'image/png'));
+      const pngBytes = new Uint8Array(await blob.arrayBuffer());
+      const png = await pdfDoc.embedPng(pngBytes);
+
+      // 新建 PDF 页, 幻灯片图填满整页 (无 HTML 中转, 无切片, 无错位, 比例与原版一致)
+      const page = pdfDoc.addPage([pdfPageW, pdfPageH]);
+      page.drawImage(png, { x: 0, y: 0, width: pdfPageW, height: pdfPageH });
+    }
+
+    const pdfArr = await pdfDoc.save();
+    return { pdfBytes: pdfArr, numPages: slideCount };
+  } finally {
+    if (renderCanvas.parentNode) document.body.removeChild(renderCanvas);
+  }
+}
+
+async function convertPptxWithViewer(arrayBuffer, isLandscape) {
+  // 离屏高分辨率画布 (16:9 1920x1080, 兼顾 4:3 自动适配)
+  const W = 1920, H = 1080;
+  const renderCanvas = document.createElement('canvas');
+  renderCanvas.width = W;
+  renderCanvas.height = H;
+  renderCanvas.style.cssText = 'position:fixed;left:-99999px;top:0;z-index:-1;pointer-events:none;';
+  document.body.appendChild(renderCanvas);
+
+  const viewer = new PptxViewJS.PPTXViewer({
+    canvas: renderCanvas,
+    backgroundColor: '#ffffff',
+    autoRenderFirstSlide: false,
+    enableThumbnails: false,
+    autoExposeGlobals: false,
+  });
+
+  try {
+    await viewer.loadFile(arrayBuffer);
+    const slideCount = viewer.getSlideCount();
+    console.log(`[Office2PDF] pptxviewjs: PPTX 包含 ${slideCount} 张幻灯片`);
+    if (slideCount === 0) throw new Error('PPTX 中无幻灯片');
+
+    // 逐页渲染为 PNG, 嵌入到 HTML 中的 <img>
+    const slideUrls = [];
+    for (let i = 0; i < slideCount; i++) {
+      progressText.textContent = `渲染 PPT 第 ${i+1}/${slideCount} 页...`;
+      await viewer.render(renderCanvas, { slideIndex: i });
+      // 等待图表异步渲染完成
+      await new Promise(r => setTimeout(r, 300));
+      const blob = await new Promise(r => renderCanvas.toBlob(r, 'image/png'));
+      const url = URL.createObjectURL(blob);
+      slideUrls.push(url);
+    }
+
+    // === 关键: 让每张幻灯片占 1 个 A4 页高度, 避免切片时切开 ===
+    // 与 convertFile 中 RENDER_W / PAGE_H 公式保持一致
+    const A4 = isLandscape ? { w: 297, h: 210 } : { w: 210, h: 297 };
+    const PX_PER_MM = 3.78;
+    const PAGE_W = Math.round(A4.w * PX_PER_MM);
+    const PAGE_H = Math.round(A4.h * PX_PER_MM);
+    // 16:9 幻灯片在 PAGE_W 宽度下, 高度 = PAGE_W * 9/16 (object-fit:contain 模拟)
+    const imgAspect = W / H; // 1920/1080 = 1.778
+    let imgW, imgH;
+    if (imgAspect > PAGE_W / PAGE_H) {
+      // 图片比页面更宽, 缩放到页面宽
+      imgW = PAGE_W;
+      imgH = Math.round(PAGE_W / imgAspect);
+    } else {
+      imgH = PAGE_H;
+      imgW = Math.round(PAGE_H * imgAspect);
+    }
+    const offsetX = Math.floor((PAGE_W - imgW) / 2);
+    const offsetY = Math.floor((PAGE_H - imgH) / 2);
+
+    let html = '<div style="background:white;margin:0;padding:0;">';
+    slideUrls.forEach((url, idx) => {
+      html += `<div style="width:${PAGE_W}px;height:${PAGE_H}px;background:white;margin:0;padding:0;box-sizing:border-box;position:relative;overflow:hidden;page-break-after:${idx < slideUrls.length - 1 ? 'always' : 'auto'};">
+        <img src="${url}" style="position:absolute;left:${offsetX}px;top:${offsetY}px;width:${imgW}px;height:${imgH}px;display:block;margin:0;padding:0;border:0;" alt="Slide ${idx+1}" />
+      </div>`;
+    });
+    html += '</div>';
+    return html;
+  } finally {
+    if (renderCanvas.parentNode) document.body.removeChild(renderCanvas);
+  }
+}
+
+// 旧版后备解析器: 提取幻灯片文本+图片, 简单排版
+async function convertPptxToHtmlFallback(arrayBuffer) {
+  const zip = new JSZip();
+  const contents = await zip.loadAsync(arrayBuffer);
+  const slideFiles = Object.keys(contents.files)
+    .filter(n => /^ppt\/slides\/slide\d+\.xml$/.test(n))
+    .sort((a, b) => parseInt((a.match(/slide(\d+)/) || [])[1] || 0) - parseInt((b.match(/slide(\d+)/) || [])[1] || 0));
+  const mediaCache = {};
+  await Promise.all(Object.keys(contents.files).filter(n => /^ppt\/media\//.test(n)).map(async (fileName) => {
+    const ext = fileName.split('.').pop().toLowerCase();
+    if (['png','jpg','jpeg','gif','bmp','svg','webp'].includes(ext)) {
+      const data = await contents.files[fileName].async('base64');
+      const mime = ext === 'svg' ? 'image/svg+xml' : (ext === 'jpg' ? 'image/jpeg' : `image/${ext}`);
+      mediaCache[fileName] = `data:${mime};base64,${data}`;
+    }
+  }));
+  const relsCache = {};
+  await Promise.all(Object.keys(contents.files).filter(n => /^ppt\/slides\/_rels\/slide\d+\.xml\.rels$/.test(n)).map(async (n) => {
+    relsCache[n] = await contents.files[n].async('text');
+  }));
+  let html = '<div style="background:#f0f0f0;padding:20px;">';
+  for (let i = 0; i < slideFiles.length; i++) {
+    const slideFile = slideFiles[i];
+    const xmlText = await contents.files[slideFile].async('text');
+    const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
+    const texts = collectElementsByLocalName(doc, 't').map(el => el.textContent.trim()).filter(Boolean);
+    const relsFile = slideFile.replace('slides/', 'slides/_rels/') + '.rels';
+    const relsDoc = new DOMParser().parseFromString(relsCache[relsFile] || '', 'text/xml');
+    const imageRels = {};
+    Array.from(relsDoc.getElementsByTagName('Relationship')).forEach(rel => {
+      if ((rel.getAttribute('Type') || '').endsWith('/image')) {
+        imageRels[rel.getAttribute('Id')] = rel.getAttribute('Target');
+      }
+    });
+    const images = [];
+    collectElementsByLocalName(doc, 'pic').forEach(pic => {
+      const blips = collectElementsByLocalName(pic, 'blip');
+      if (blips.length) {
+        const embedId = getAttributeByLocalName(blips[0], 'embed');
+        if (embedId && imageRels[embedId]) {
+          const target = imageRels[embedId].replace(/^\.\.\//, 'ppt/');
+          if (mediaCache[target]) images.push(mediaCache[target]);
+        }
+      }
+    });
+    html += `<div style="width:800px;min-height:600px;background:white;margin:20px auto;padding:50px 60px;box-shadow:0 4px 12px rgba(0,0,0,0.15);page-break-after:always;box-sizing:border-box;font-family:'Microsoft YaHei',serif;position:relative;">
+      <div style="position:absolute;top:10px;right:20px;font-size:11px;color:#999;">第 ${i+1} / ${slideFiles.length} 页</div>
+      <div style="font-size:22px;line-height:1.8;margin-top:30px;">${texts.length ? texts.map(t => `<p style="margin:10px 0;">${escapeHtml(t)}</p>`).join('') : '<p style="color:#999;font-style:italic;">(无文本内容)</p>'}</div>
+      ${images.length ? `<div style="margin-top:24px;display:flex;flex-wrap:wrap;gap:12px;">${images.map(s => `<img src="${s}" style="max-width:45%;max-height:300px;object-fit:contain;border:1px solid #eee;" />`).join('')}</div>` : ''}
+    </div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+async function convertWpsToHtml(arrayBuffer) {
+  const zip = new JSZip();
+  try {
+    const contents = await zip.loadAsync(arrayBuffer);
+    const candidates = ['word/document.xml', 'word/document2.xml', 'content.xml'];
+    let mainXml = null;
+    for (const c of candidates) if (contents.files[c]) { mainXml = await contents.files[c].async('text'); break; }
+    if (!mainXml) {
+      let allText = '';
+      for (const name of Object.keys(contents.files)) {
+        if (name.endsWith('.xml') || name.endsWith('.XML')) {
+          try {
+            const xml = await contents.files[name].async('text');
+            const doc = new DOMParser().parseFromString(xml, 'text/xml');
+            const walker = doc.createTreeWalker(doc, NodeFilter.SHOW_TEXT, null);
+            let n; while ((n = walker.nextNode())) { const t = n.textContent.trim(); if (t.length > 1) allText += t + '\n'; }
+          } catch (e) {}
+        }
+      }
+      return `<pre style="padding:20px;font-family:'Microsoft YaHei',serif;white-space:pre-wrap;line-height:1.6;">${escapeHtml(allText)}</pre>`;
+    }
+    const doc = new DOMParser().parseFromString(mainXml, 'text/xml');
+    const texts = collectElementsByLocalName(doc, 't').map(el => el.textContent.trim()).filter(Boolean);
+    return `<div style="padding:20px 30px;font-family:'Microsoft YaHei',serif;line-height:1.7;font-size:14px;color:#222;">${texts.length ? texts.map(t => `<p style="margin:8px 0;">${escapeHtml(t)}</p>`).join('') : '<p style="color:#999;">(无文本)</p>'}</div>`;
+  } catch (e) { throw new Error('WPS 解析失败: ' + e.message); }
+}
+
+async function convertDocToHtml(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  const lines = []; let cur = ''; let has = false;
+  for (let i = 0; i < bytes.length - 1; i += 2) {
+    const code = bytes[i] | (bytes[i+1] << 8);
+    if (code === 0x0A || code === 0x0D) {
+      if (cur.trim().length > 0) { lines.push(cur.trim()); has = true; }
+      cur = '';
+    } else if (code >= 0x20 && code < 0xFF00 && code !== 0x7F) cur += String.fromCharCode(code);
+    else if (code === 0) { if (cur.trim().length > 1) { lines.push(cur.trim()); has = true; } cur = ''; }
+    else cur = '';
+  }
+  if (cur.trim().length > 1) { lines.push(cur.trim()); has = true; }
+  const dedup = []; for (const l of lines) if (!dedup.length || dedup[dedup.length-1] !== l) dedup.push(l);
+  return `<div style="padding:20px 30px;font-family:'Microsoft YaHei',serif;">${has ? dedup.map(l => `<p style="margin:6px 0;line-height:1.7;">${escapeHtml(l)}</p>`).join('') : '<p style="color:#999;font-style:italic;">(未提取到文本。建议另存为 .docx)</p>'}</div>`;
+}
+
+async function convertRtfToHtml(arrayBuffer) {
+  return rtfToHtml(new TextDecoder('utf-8').decode(arrayBuffer));
+}
+function rtfToHtml(rtf) {
+  let result = ''; let i = 0; const len = rtf.length; const stack = [{}];
+  function g() { return stack[stack.length-1]; }
+  function emit(t) { const grp = g(); if (grp.b) t = `<b>${t}</b>`; if (grp.i) t = `<i>${t}</i>`; if (grp.u) t = `<u>${t}</u>`; result += t; }
+  while (i < len) {
+    const ch = rtf[i];
+    if (ch === '{') { stack.push({...g()}); i++; }
+    else if (ch === '}') { stack.pop(); i++; }
+    else if (ch === '\\') {
+      i++; if (i >= len) break;
+      if (rtf[i] === "'") { const code = parseInt(rtf.substr(i+1, 2), 16); if (!isNaN(code)) emit(String.fromCharCode(code)); i += 3; continue; }
+      if (rtf[i] === '\\' || rtf[i] === '{' || rtf[i] === '}') { emit(rtf[i]); i++; continue; }
+      let word = ''; while (i < len && /[a-zA-Z]/.test(rtf[i])) { word += rtf[i]; i++; }
+      let param = '';
+      if (i < len && (rtf[i] === '-' || /[0-9]/.test(rtf[i]))) {
+        if (rtf[i] === '-') { param += '-'; i++; }
+        while (i < len && /[0-9]/.test(rtf[i])) { param += rtf[i]; i++; }
+      }
+      if (i < len && rtf[i] === ' ') i++;
+      const grp = g(); const wl = word.toLowerCase();
+      switch (wl) {
+        case 'par': case 'line': result += '</p><p>'; break;
+        case 'tab': emit('\t'); break;
+        case 'b': grp.b = param !== '0'; break;
+        case 'i': grp.i = param !== '0'; break;
+        case 'ul': grp.u = param !== '0'; break;
+        case 'ulnone': grp.u = false; break;
+        case 'u': { const c = parseInt(param) || 0; emit(String.fromCharCode(c < 0 ? 65536 + c : c)); if (i < len && rtf[i] !== ' ' && rtf[i] !== '\\') i++; break; }
+        case 'lquote': emit('\u2018'); break;
+        case 'rquote': emit('\u2019'); break;
+        case 'ldblquote': emit('\u201C'); break;
+        case 'rdblquote': emit('\u201D'); break;
+        case 'emdash': emit('\u2014'); break;
+        case 'endash': emit('\u2013'); break;
+        case 'bullet': emit('\u2022'); break;
+        case '~': emit('\u00A0'); break;
+      }
+    } else if (ch === '\r' || ch === '\n') i++;
+    else { emit(ch); i++; }
+  }
+  return `<div style="padding:20px 30px;font-family:'Microsoft YaHei',serif;line-height:1.7;"><p>${result}</p></div>`.replace(/<p>\s*<\/p>/g, '').replace(/<\/p><p>/g, '</p>\n<p>');
+}
+
+async function convertTxtToHtml(arrayBuffer) {
+  const t = new TextDecoder('utf-8').decode(arrayBuffer);
+  return `<pre style="padding:20px 30px;font-family:'Microsoft YaHei','Consolas',monospace;white-space:pre-wrap;line-height:1.6;font-size:13px;">${escapeHtml(t)}</pre>`;
+}
+
+async function convertXmlToHtml(arrayBuffer) {
+  const text = new TextDecoder('utf-8').decode(arrayBuffer);
+  let pretty = text;
+  try {
+    const doc = new DOMParser().parseFromString(text, 'text/xml');
+    if (!doc.querySelector('parsererror')) pretty = formatXml(text);
+  } catch (e) {}
+  return `<pre style="padding:20px 30px;font-family:'Consolas','Courier New',monospace;white-space:pre-wrap;line-height:1.5;font-size:12px;color:#333;">${escapeHtml(pretty)}</pre>`;
+}
+function formatXml(xml) {
+  let out = '', ind = 0;
+  const toks = xml.replace(/>\s*</g, '><').split(/(<[^>]+>)/g).filter(Boolean);
+  for (const t of toks) {
+    if (/^<\//.test(t)) { ind = Math.max(0, ind - 1); out += '  '.repeat(ind) + t + '\n'; }
+    else if (/^<[^>]+[^/]>$/.test(t) && !/^<\?/.test(t) && !/^<!--/.test(t)) { out += '  '.repeat(ind) + t + '\n'; ind++; }
+    else out += '  '.repeat(ind) + t + '\n';
+  }
+  return out.trim();
+}
+
+async function convertMdToHtml(arrayBuffer) {
+  const md = new TextDecoder('utf-8').decode(arrayBuffer);
+  return `<div style="padding:20px 40px;font-family:'Microsoft YaHei',serif;line-height:1.7;max-width:800px;margin:0 auto;">${marked.parse(md)}</div>`;
+}
+async function convertHtmlFileToHtml(arrayBuffer) {
+  return `<div style="padding:20px;">${new TextDecoder('utf-8').decode(arrayBuffer)}</div>`;
+}
+
+function collectElementsByLocalName(root, ln) {
+  const r = []; for (const el of root.getElementsByTagName('*')) if (el.localName === ln) r.push(el); return r;
+}
+function getAttributeByLocalName(el, ln) {
+  if (!el || !el.attributes) return null;
+  for (const a of el.attributes) if (a.localName === ln) return a.value;
+  return null;
+}
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function truncate(s, max) {
+  s = String(s);
+  return s.length > max ? s.substring(0, max - 1) + '…' : s;
+}
+// ASCII 安全转换: 若含非 ASCII 字符, 转为十六进制形式 (用于 PDF WinAnsi 编码兼容)
+function asciiSafe(s) {
+  s = String(s || '');
+  if (/^[\x00-\x7F]*$/.test(s)) return s;
+  // 非 ASCII: 转为 Unicode 码点列表 (e.g. "本" -> "U+672C")
+  return Array.from(s).map(c => /[\x00-\x7F]/.test(c) ? c : 'U+' + c.codePointAt(0).toString(16).toUpperCase()).join('');
+}
+
+// ===== PFX 证书生成与解析 (使用 node-forge) =====
+function generatePfx(subjectCn) {
+  // 用 forge 生成 RSA-2048 密钥对和自签名证书, 打包为 PKCS#12 (PFX)
+  const keys = forge.pki.rsa.generateKeyPair(2048);
+  const cert = forge.pki.createCertificate();
+  cert.publicKey = keys.publicKey;
+  cert.serialNumber = '01' + forge.util.bytesToHex(forge.random.getBytesSync(8));
+  cert.validity.notBefore = new Date();
+  cert.validity.notAfter = new Date();
+  cert.validity.notAfter.setFullYear(cert.validity.notBefore.getFullYear() + 1);
+  const attrs = [{ name: 'commonName', value: subjectCn }, { name: 'countryName', value: 'CN' }];
+  cert.setSubject(attrs);
+  cert.setIssuer(attrs);  // 自签名
+  cert.sign(keys.privateKey, forge.md.sha256.create());
+  const p12Asn1 = forge.pkcs12.toPkcs12Asn1(keys.privateKey, [cert], null, { algorithm: '3des' });
+  const p12Der = forge.asn1.toDer(p12Asn1).getBytes();
+  return { cert, key: keys.privateKey, p12Der, subjectCn };
+}
+
+function getCertInfo(cert) {
+  const getAttr = (rdn, name) => {
+    const attr = rdn.attributes.find(a => a.shortName === name || a.name === name || a.name.endsWith(name));
+    return attr ? attr.value : null;
+  };
+  return {
+    cn: getAttr(cert.subject, 'CN') || cert.subject.attributes[0]?.value || 'Unknown',
+    subject: cert.subject.attributes.map(a => `${a.shortName || a.name}=${a.value}`).join(', '),
+    issuer: cert.issuer.attributes.map(a => `${a.shortName || a.name}=${a.value}`).join(', '),
+    validFrom: cert.validity.notBefore.toISOString().split('T')[0],
+    validTo: cert.validity.notAfter.toISOString().split('T')[0],
+    serial: cert.serialNumber,
+  };
+}
+
+// 预生成两个内置 PFX (页面加载时执行)
+const BUILTIN_PFXS = PFX_CNS.map(cn => generatePfx(cn));
+
+// ===== 签名主流程 =====
+signBtn.addEventListener('click', async () => {
+  if (!state.pdfBytes) { alert('请先转换文件'); return; }
+  const sigType = document.querySelector('input[name="sigType"]:checked').value;
+  if (sigType === 'image' && !state.signatureImageBytes) { alert('请先上传签名图片'); return; }
+  const okDownload = await showModal({
+    title: '下载前提示',
+    message: '本网站转换的 PDF 不会储存在云端服务器上（其实没有）, 转换结果可能有错误, 敬请谅解~😊\n\n继续下载签名后的 PDF?',
+    icon: '📢',
+    showCancel: true,
+    okText: '继续下载',
+    cancelText: '取消',
+  });
+  if (!okDownload) return;
+  const info = {
+    sigType,
+    position: document.getElementById('signPosition').value,
+    size: parseInt(document.getElementById('signSize').value, 10),
+    pages: document.getElementById('signPages').value,
+    caption: document.getElementById('signCaption').value.trim(),
+    date: document.getElementById('signDate').value.trim() || new Date().toISOString().replace('T', ' ').substring(0, 19),
+    useCert: document.getElementById('useCert').checked,
+    certCn: (document.getElementById('pfxSubject')?.value || '').trim() || 'auto-cert',
+  };
+  signBtn.disabled = true;
+  const orig = signBtn.textContent;
+  signBtn.textContent = '签名中...';
+  try {
+    const result = await addSignature(state.pdfBytes, info);
+    state.lastSignature = result;
+    downloadPdf(result.signedBytes, state.file.name.replace(/\.[^.]+$/, '') + '-signed.pdf');
+    signBtn.textContent = '✓ 已下载' + (result.cryptoSig ? '（可点击验证）' : '');
+    if (result.cryptoSig) verifyBtn.classList.remove('hidden');
+    setTimeout(() => { signBtn.textContent = orig; signBtn.disabled = false; }, 3000);
+  } catch (err) {
+    console.error(err);
+    alert('签名失败：' + err.message);
+    signBtn.textContent = orig; signBtn.disabled = false;
+  }
+});
+
+async function addSignature(pdfBytes, info) {
+  // 如果使用证书, 检查 forge 是否加载
+  if (info.useCert && typeof forge === 'undefined') {
+    throw new Error('node-forge 库未加载, 无法进行证书签名. 请刷新页面或检查网络. (取消勾选"附加证书签名"可不依赖 forge)');
+  }
+  const pdfDoc = await PDFLib.PDFDocument.load(pdfBytes);
+  const pages = pdfDoc.getPages();
+  const helvetica = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+  const helveticaBold = await pdfDoc.embedFont(PDFLib.StandardFonts.HelveticaBold);
+
+  // 1) 证书密钥 (可选)
+  let signingPfx = null;
+  if (info.useCert) {
+    console.log('[Office2PDF] 为 CN="' + info.certCn + '" 自动生成 PFX 证书');
+    signingPfx = generatePfx(info.certCn);
+  }
+
+  // 2) 准备可见图片签名 (仅图片模式, 不再支持文字签名)
+  let primarySigImage = null;
+  if (info.sigType === 'image' && state.signatureImageBytes) {
+    try { primarySigImage = await pdfDoc.embedPng(state.signatureImageBytes); }
+    catch (e) { try { primarySigImage = await pdfDoc.embedJpg(state.signatureImageBytes); } catch (e2) { console.warn('图片签名嵌入失败:', e2); } }
+  }
+
+  // 3) 绘制可见图片签名 (按用户选择位置/页码)
+  if (primarySigImage) {
+    const targetPages = info.pages === 'first' ? [pages[0]]
+      : info.pages === 'last' ? [pages[pages.length-1]] : pages;
+    const aspect = primarySigImage.width / primarySigImage.height;
+    const sigW = info.size;
+    const sigH = sigW / aspect;
+    const m = 10;
+    targetPages.forEach(page => {
+      const { width, height } = page.getSize();
+      let x, y, ty;
+      if (info.position === 'br') { x = width - sigW - m; y = m + 15; ty = y + sigH + 4; }
+      else if (info.position === 'bl') { x = m; y = m + 15; ty = y + sigH + 4; }
+      else if (info.position === 'tr') { x = width - sigW - m; y = height - sigH - m - 20; ty = y - 12; }
+      else { x = m; y = height - sigH - m - 20; ty = y - 12; }
+      page.drawImage(primarySigImage, { x, y, width: sigW, height: sigH });
+      const capSafe = asciiSafe(info.caption);
+      if (capSafe) page.drawText(capSafe, { x, y: ty, size: 8, font: helvetica });
+      const dateSafe = asciiSafe(info.date);
+      if (dateSafe) page.drawText(dateSafe, { x, y: ty - 10, size: 7, font: helvetica, color: PDFLib.rgb(0.3, 0.3, 0.3) });
+    });
+  }
+
+  // 4) 元数据 (PDF 阅读器"文档属性→描述"可见)
+  const now = new Date();
+  const signerCn = signingPfx ? getCertInfo(signingPfx.cert).cn : 'NoCert';
+  if (signingPfx) {
+    pdfDoc.setTitle(`[PFX-Signed] ${state.file.name}`);
+    pdfDoc.setAuthor(`${signerCn} (Office2PDF PFX Cert)`);
+    pdfDoc.setSubject(`Digitally signed by PFX certificate: ${signerCn} | RSA-2048 / SHA-256 | ${now.toISOString()}`);
+    pdfDoc.setKeywords(['Digital Signature', 'PFX Certificate', `Signer: ${signerCn}`, `Algorithm: RSA-2048/SHA-256`, `Signed-At: ${now.toISOString()}`, `Issuer: Self-Signed`]);
+  } else {
+    pdfDoc.setTitle(state.file.name);
+    pdfDoc.setAuthor('Office2PDF Browser Edition');
+    pdfDoc.setSubject('Converted via Office2PDF (no PFX signing)');
+    pdfDoc.setKeywords(['Office2PDF', 'no-signature']);
+  }
+  pdfDoc.setCreator('Office2PDF Browser Edition');
+  pdfDoc.setProducer('Office2PDF Browser Edition (PFX-aware)');
+
+  // 5) 证书签名: 在 PDF 末尾追加独立签名页 (不覆盖任何原内容, 避免错位)
+  if (signingPfx) {
+    addSignaturePageToPdf(pdfDoc, helvetica, helveticaBold, signingPfx, now);
+  }
+
+  const pdfArr = await pdfDoc.save({ useObjectStreams: false });
+
+  // 6) 加密签名: 用 PFX 私钥对 PDF 字节签名, 嵌入 % 注释块
+  if (!signingPfx) {
+    return { signedBytes: pdfArr, cryptoSig: null };
+  }
+  try {
+    const md = forge.md.sha256.create();
+    md.update(forge.util.createBuffer(pdfArr, 'binary').getBytes());
+    const sigBin = signingPfx.key.sign(md);
+    const sigHex = forge.util.bytesToHex(sigBin);
+    const pubPem = forge.pki.publicKeyToPem(signingPfx.cert.publicKey);
+    const block = `\n% ===== Office2PDF PFX Crypto Sig =====\n% Signer-CN: ${signerCn}\n% Algorithm: RSA-2048 / SHA-256\n% Signed-At: ${now.toISOString()}\n% Public-Key-PEM: ${pubPem.replace(/\n/g, '|')}\n% Signature-Hex: ${sigHex}\n% =====================================\n`;
+    return {
+      signedBytes: concatBytes(pdfArr, new TextEncoder().encode(block)),
+      cryptoSig: { sigHex, pubPem, signedLength: pdfArr.length, dateStr: now.toISOString(), cert: signingPfx.cert }
+    };
+  } catch (err) {
+    console.error('[Office2PDF] 加密签名失败:', err);
+    throw new Error('PFX 签名失败: ' + err.message);
+  }
+}
+
+// 在 PDF 末尾追加独立的"数字签名页" (不再在内容页上绘制, 彻底避免与原内容错位)
+function addSignaturePageToPdf(pdfDoc, font, fontBold, pfx, date) {
+  if (!pfx) return;
+  const info = getCertInfo(pfx.cert);
+  const pubPem = forge.pki.publicKeyToPem(pfx.cert.publicKey);
+
+  // A4 纵向
+  const pageW = 595, pageH = 842;
+  const page = pdfDoc.addPage([pageW, pageH]);
+  const margin = 40;
+  const blue = PDFLib.rgb(0.1, 0.25, 0.55);
+  const gray = PDFLib.rgb(0.3, 0.3, 0.3);
+  const black = PDFLib.rgb(0, 0, 0);
+
+  // 顶部蓝条
+  page.drawRectangle({ x: 0, y: pageH - 12, width: pageW, height: 12, color: blue });
+  page.drawText('Office2PDF', { x: margin, y: pageH - 28, size: 10, font: fontBold, color: blue });
+
+  // 标题
+  let y = pageH - 70;
+  page.drawText('Digital Signature Certificate', { x: margin, y, size: 22, font: fontBold, color: blue });
+  y -= 12;
+  page.drawText('PFX / RSA-2048 / SHA-256', { x: margin, y, size: 10, font, color: gray });
+  y -= 8;
+  // 分隔线
+  page.drawLine({ start: { x: margin, y }, end: { x: pageW - margin, y }, thickness: 0.8, color: blue });
+  y -= 24;
+
+  // 信息行
+  const rowH = 18;
+  const labelW = 130;
+  const rows = [
+    ['Signer CN', asciiSafe(info.cn)],
+    ['Issuer', asciiSafe(info.issuer)],
+    ['Serial Number', asciiSafe(info.serial)],
+    ['Valid From', asciiSafe(info.validFrom)],
+    ['Valid To', asciiSafe(info.validTo)],
+    ['Algorithm', 'RSA-2048'],
+    ['Hash', 'SHA-256'],
+    ['Signed At', date.toISOString()],
+  ];
+  rows.forEach(([label, value]) => {
+    page.drawText(label, { x: margin, y, size: 11, font: fontBold, color: blue });
+    const truncated = truncate(value, 50);
+    page.drawText(truncated, { x: margin + labelW, y, size: 11, font, color: black });
+    y -= rowH;
+  });
+  y -= 10;
+
+  // 提示框 (全英文, 避免 WinAnsi 中文编码错误)
+  page.drawText('This PDF is cryptographically signed with RSA-2048 / SHA-256.', { x: margin, y, size: 9, font, color: gray });
+  y -= 14;
+  page.drawText('Any modification to the content will invalidate the signature.', { x: margin, y, size: 9, font, color: gray });
+  y -= 14;
+  page.drawText('View metadata in PDF Reader: Document Properties > Description.', { x: margin, y, size: 9, font, color: gray });
+}
+
+// drawCertStampOnPage 已弃用, 证书信息现在通过 addSignaturePageToPdf 在末尾独立页显示
+function drawCertStampOnPage() {
+  // no-op
+}
+
+verifyBtn.addEventListener('click', async () => {
+  if (!state.lastSignature?.cryptoSig) return;
+  const r = document.querySelector('.verify-result');
+  r.classList.remove('hidden');
+  r.innerHTML = '验证中...';
+  try {
+    const { sigHex, pubPem, signedLength, dateStr, cert } = state.lastSignature.cryptoSig;
+    const signedPart = state.lastSignature.signedBytes.slice(0, signedLength);
+    // 用 forge 验证 RSA 签名
+    const publicKey = forge.pki.publicKeyFromPem(pubPem);
+    const md = forge.md.sha256.create();
+    md.update(forge.util.createBuffer(signedPart, 'binary').getBytes());
+    const valid = publicKey.verify(md.digest().getBytes(), forge.util.hexToBytes(sigHex));
+    const hashBuf = await crypto.subtle.digest('SHA-256', signedPart);
+    const hashHex = Array.from(new Uint8Array(hashBuf)).map(x => x.toString(16).padStart(2, '0')).join('');
+    const certInfo = getCertInfo(cert);
+    if (valid) {
+      r.innerHTML = `<div class="text-green-700 font-semibold mb-2">✓ PFX 加密签名验证通过</div>
+        <div class="text-xs text-gray-700 space-y-1">
+          <div>签名证书: <b>${escapeHtml(certInfo.cn)}</b></div>
+          <div>签名时间: ${escapeHtml(dateStr)}</div>
+          <div>算法: RSA-2048 / SHA-256 / PKCS#1 v1.5</div>
+          <div>已签名字节: ${signedLength}</div>
+          <div>PDF 摘要: <code class="text-[10px] break-all">${hashHex.slice(0, 32)}…${hashHex.slice(-32)}</code></div>
+        </div>`;
+    } else {
+      r.innerHTML = '<span class="text-red-600">✗ 验证失败 - PDF 已被篡改</span>';
+    }
+  } catch (err) {
+    r.innerHTML = '<span class="text-red-600">✗ 出错: ' + escapeHtml(err.message) + '</span>';
+  }
+});
+
+function bufferToHex(b) { return Array.from(new Uint8Array(b)).map(x => x.toString(16).padStart(2, '0')).join(''); }
+function hexToBuffer(h) { const b = new Uint8Array(h.length / 2); for (let i = 0; i < b.length; i++) b[i] = parseInt(h.substr(i*2, 2), 16); return b; }
+function concatBytes(a, b) { const c = new Uint8Array(a.length + b.length); c.set(a, 0); c.set(b, a.length); return c; }
+function downloadPdf(bytes, name) {
+  const blob = new Blob([bytes], { type: 'application/pdf' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// 预览面板里的 "下载查看" 链接也拦截一次, 显示提示
+document.getElementById('previewDownloadLink')?.addEventListener('click', async (e) => {
+  if (!state.pdfBytes) return;
+  e.preventDefault();
+  const ok = await showModal({
+    title: '下载前提示',
+    message: '本网站转换的 PDF 不会储存在云端服务器上（其实没有）, 转换结果可能有错误, 敬请谅解~😊\n\n继续下载预览的 PDF?',
+    icon: '📢',
+    showCancel: true,
+    okText: '继续下载',
+    cancelText: '取消',
+  });
+  if (ok && state.previewUrl) window.location.href = state.previewUrl;
+});
+
+previewBtn.addEventListener('click', async () => {
+  if (!state.pdfBytes) { alert('请先转换文件'); return; }
+  const okPreview = await showModal({
+    title: '预览前提示',
+    message: '本网站转换的 PDF 不会储存在云端服务器上（其实没有）, 转换结果可能有错误, 敬请谅解~😊\n\n继续预览未签名的 PDF?',
+    icon: '📢',
+    showCancel: true,
+    okText: '继续预览',
+    cancelText: '取消',
+  });
+  if (!okPreview) return;
+  try {
+    if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
+    const blob = new Blob([state.pdfBytes], { type: 'application/pdf' });
+    state.previewUrl = URL.createObjectURL(blob);
+    // 【修复】用 <embed> 替代 <iframe>, 兼容性更好. 注意: <embed> 不支持 .data 属性!
+    pdfPreview.src = state.previewUrl;
+    pdfPreview.removeAttribute('data');
+    previewDownloadLink.href = state.previewUrl;
+    previewSection.classList.remove('hidden');
+    previewSection.scrollIntoView({ behavior: 'smooth' });
+  } catch (err) {
+    console.error('[Office2PDF] 预览失败:', err);
+    alert('预览失败: ' + err.message);
+  }
+});
+</script>
+</body>
+</html>
