@@ -695,8 +695,13 @@ async function detectOrientation(arrayBuffer, type) {
     } else if (type === 'xlsx') {
       const wb = XLSX.read(arrayBuffer, { type: 'array' });
       for (const name of wb.SheetNames) {
-        const ps = wb.Sheets[name]['!pageSetup'] || wb.Sheets[name]['!pageSetup'];
-        // SheetJS doesn't always have pageSetup; fallback: check sheet dimensions
+        const sh = wb.Sheets[name];
+        if (!sh) continue;
+        // 防御: 避免空表 !ref 为 undefined 引发后续解析异常
+        if (!sh['!ref']) sh['!ref'] = 'A1';
+        // SheetJS 不一定含 pageSetup, 退而检查工作表尺寸判断横纵向
+        const ref = XLSX.utils.decode_range(sh['!ref']);
+        if (ref.e.c - ref.s.c > ref.e.r - ref.s.r) return 'landscape';
       }
     }
   } catch (e) {
@@ -733,7 +738,10 @@ function workbookToHtml(workbook) {
   let html = `<div style="padding: 20px;">`;
   workbook.SheetNames.forEach((sheetName, idx) => {
     const sheet = workbook.Sheets[sheetName];
-    let sheetHtml = XLSX.utils.sheet_to_html(sheet, { editable: false });
+    // 修复: SheetJS 0.18.5 空工作表(!ref 为 undefined)会触发 sheet_to_html 报错
+    if (!sheet || !sheet['!ref']) {
+      if (sheet) sheet['!ref'] = 'A1';
+      else workbook.Sheets
     // 把样式转为内联, 避免 html2pdf 字符串模式下丢失
     sheetHtml = sheetHtml
       .replace(/<table /g, '<table style="border-collapse:collapse;width:100%;font-family:Microsoft YaHei,serif;font-size:12px;" ')
